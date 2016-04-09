@@ -44,6 +44,7 @@ namespace Vice
 			virtual R invoke(typename helper::ParameterType<T>::Type...) = 0;
 			virtual Delegate_Impl* clone() = 0;
 			virtual bool compare(Delegate_Impl* rhs) = 0;
+			virtual void* getTargetObj(){ return nullptr; }
 		};
 
 		template<class R, class...T>
@@ -117,6 +118,11 @@ namespace Vice
 					return m_obj == cast->m_obj && m_method == cast->m_method;
 				}
 				return false;
+			}
+
+			void* getTargetObj() override
+			{
+				return m_obj;
 			}
 
 		private:
@@ -230,6 +236,16 @@ namespace Vice
 		bool operator!=(const Delegate& rhs) const
 		{
 			return !(*this == rhs);
+		}
+
+		void* getTargetObj()
+		{
+			return m_dele ? m_dele->getTargetObj() : nullptr;
+		}
+
+		bool isTargetObj(void* obj)
+		{
+			return getTargetObj() == obj;
 		}
 
 	private:
