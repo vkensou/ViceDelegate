@@ -5,6 +5,7 @@
 
 namespace Vice
 {
+	//helper come from Loki library.
 	namespace helper
 	{
 		template<bool flag, typename T, typename U>
@@ -33,26 +34,54 @@ namespace Vice
 		{
 			typedef typename Select<std::is_arithmetic<T>::value || std::is_pointer<T>::value || std::is_member_function_pointer<T>::value, T, typename AddParameterType<T>::Result>::Result Type;
 		};
+
+		template <class T, class U>
+		struct ConversionHelper
+		{
+			typedef char Small;
+			struct Big { char dummy[2]; };
+			static Big   Test(...);
+			static Small Test(U);
+			static T MakeT();
+		};
+
+		template <class T, class U>
+		struct Conversion
+		{
+			typedef ConversionHelper<T, U> H;
+			enum { exists = sizeof(typename H::Small) == sizeof((H::Test(H::MakeT()))) };
+			typedef std::integral_constant<bool, exists> type;
+		};
+
+		class NullClass
+		{
+		};
 	}
+
+	class ObserverUnlink;
+
 	namespace detail
 	{
-		template<class R, class...T>
+		template<class Allocator, class R, class...T>
 		class Delegate_Impl
+			:public Allocator
 		{
 		public:
 			virtual ~Delegate_Impl(){}
-			virtual R invoke(typename helper::ParameterType<T>::Type...) = 0;
+			virtual R invoke(typename helper::ParameterType<T>::Type...) const = 0;
 			virtual Delegate_Impl* clone() = 0;
 			virtual bool compare(Delegate_Impl* rhs) = 0;
-			virtual void* getTargetObj(){ return nullptr; }
+			virtual bool isTargetObj(void* obj){ return false; }
+			virtual bool isTargetObj(ObserverUnlink* unlink){ return false; }
+			virtual ObserverUnlink* getUnlink(){ return false; }
 		};
 
-		template<class R, class...T>
+		template<class Allocator, class R, class...T>
 		class Delegate_Function_Impl
-			:public Delegate_Impl<R, T...>
+			:public Delegate_Impl<Allocator, R, T...>
 		{
-			typedef Delegate_Function_Impl<R, T...> My;
-			typedef Delegate_Impl<R, T...> Base;
+			typedef Delegate_Function_Impl<Allocator, R, T...> My;
+			typedef Delegate_Impl<Allocator, R, T...> Base;
 		public:
 			typedef R(Function)(T...);
 			Delegate_Function_Impl(Function* function) throw()
@@ -60,7 +89,7 @@ namespace Vice
 			{
 			}
 
-			R invoke(typename helper::ParameterType<T>::Type...t) override
+			R invoke(typename helper::ParameterType<T>::Type...t) const override
 			{
 				return m_func(t...);
 			}
@@ -84,23 +113,22 @@ namespace Vice
 			Function* m_func;
 		};
 
-		template<class Obj, class R, class...T>
+		template<class Allocator, class Obj, class R, class...T>
 		class Delegate_ObjMethod_Impl
-			:public Delegate_Impl<R, T...>
+			:public Delegate_Impl<Allocator, R, T...>
 		{
-			typedef Delegate_ObjMethod_Impl<Obj, R, T...> My;
-			typedef Delegate_Impl<R, T...> Base;
-
+			typedef Delegate_ObjMethod_Impl<Allocator, Obj, R, T...> My;
+			typedef Delegate_Impl<Allocator, R, T...> Base;
+			typedef typename helper::Conversion<Obj, ObserverUnlink>::type CanConvertToUnlink;
 		public:
 			typedef R(Obj::*Method)(T...);
 
 			Delegate_ObjMethod_Impl(Obj* obj, Method method) throw()
 				:m_obj(obj), m_method(method)
 			{
-
 			}
 
-			R invoke(typename helper::ParameterType<T>::Type...t) override
+			R invoke(typename helper::ParameterType<T>::Type...t) const override
 			{
 				return (m_obj->*m_method)(t...);
 			}
@@ -120,9 +148,33 @@ namespace Vice
 				return false;
 			}
 
-			void* getTargetObj() override
+			virtual bool isTargetObj(void* obj) override
+			{
+				return m_obj == obj;
+			}
+
+			virtual bool isTargetObj(ObserverUnlink* unlink) override
+			{
+				if (ObserverUnlink* me = getUnlink())
+				{
+					return me == unlink;
+				}
+				return false;
+			}
+
+			virtual ObserverUnlink* getUnlink() override
+			{
+				return getUnlink_impl(CanConvertToUnlink());
+			}
+
+			ObserverUnlink* getUnlink_impl(std::true_type)
 			{
 				return m_obj;
+			}
+
+			ObserverUnlink* getUnlink_impl(std::false_type)
+			{
+				return nullptr;
 			}
 
 		private:
@@ -130,19 +182,19 @@ namespace Vice
 			Method m_method;
 		};
 
-		template<class Callable, class R, class...T>
+		template<class Allocator, class Callable, class R, class...T>
 		class Delegate_Callable_Impl
-			:public Delegate_Impl<R, T...>
+			:public Delegate_Impl<Allocator, R, T...>
 		{
-			typedef Delegate_Callable_Impl<Callable, R, T...> My;
-			typedef Delegate_Impl<R, T...> Base;
+			typedef Delegate_Callable_Impl<Allocator, Callable, R, T...> My;
+			typedef Delegate_Impl<Allocator, R, T...> Base;
 		public:
 			Delegate_Callable_Impl(Callable& function) throw()
 				:m_func(function)
 			{
 			}
 
-			R invoke(typename helper::ParameterType<T>::Type...t) override
+			R invoke(typename helper::ParameterType<T>::Type...t) const override
 			{
 				return m_func(t...);
 			}
@@ -158,16 +210,15 @@ namespace Vice
 			}
 
 		private:
-			Callable m_func;
+			mutable Callable m_func;
 		};
-
 	}
 
-	template<class T>
+	template<class T, class Allocator = helper::NullClass>
 	class Delegate;
 
-	template<class R, class...T>
-	class Delegate<R(T...)>
+	template<class Allocator, class R, class...T>
+	class Delegate<R(T...), Allocator>
 	{
 	public:
 		Delegate() throw()
@@ -176,19 +227,19 @@ namespace Vice
 
 		template<class Callable>
 		Delegate(Callable function) throw()
-			: m_dele(make_unique<detail::Delegate_Callable_Impl<Callable, R, T...>>(function))
+			: m_dele(std::make_unique<detail::Delegate_Callable_Impl<Allocator, Callable, R, T...>>(function))
 		{
 		}
 
 		typedef R(Function)(T...);
 		Delegate(Function* function) throw()
-			: m_dele(make_unique<detail::Delegate_Function_Impl<R, T...>>(function))
+			: m_dele(std::make_unique<detail::Delegate_Function_Impl<Allocator, R, T...>>(function))
 		{
 		}
 
 		template<class Obj>
 		Delegate(Obj* obj, R(Obj::*Method)(T...)) throw()
-			: m_dele(make_unique<detail::Delegate_ObjMethod_Impl<Obj, R, T...>>(obj, Method))
+			: m_dele(std::make_unique<detail::Delegate_ObjMethod_Impl<Allocator, Obj, R, T...>>(obj, Method))
 		{
 		}
 
@@ -208,6 +259,12 @@ namespace Vice
 			return *this;
 		}
 
+		Delegate& operator=(nullptr_t)
+		{
+			m_dele.reset();
+			return *this;
+		}
+
 		~Delegate() throw()
 		{
 		}
@@ -217,10 +274,10 @@ namespace Vice
 			m_dele.swap(other.m_dele);
 		}
 
-		R operator()(typename helper::ParameterType<T>::Type...t)
+		R operator()(typename helper::ParameterType<T>::Type...t) const
 		{
 			assert(m_dele);
-			m_dele->invoke(t...);
+			return m_dele->invoke(t...);
 		}
 
 		operator bool() const
@@ -238,18 +295,23 @@ namespace Vice
 			return !(*this == rhs);
 		}
 
-		void* getTargetObj()
-		{
-			return m_dele ? m_dele->getTargetObj() : nullptr;
-		}
-
 		bool isTargetObj(void* obj)
 		{
-			return getTargetObj() == obj;
+			return m_dele ? m_dele->isTargetObj(obj) : false;
+		}
+
+		bool isTargetObj(ObserverUnlink* unlink)
+		{
+			return m_dele ? m_dele->isTargetObj(unlink) : false;
+		}
+
+		ObserverUnlink* getUnlink()
+		{
+			return m_dele ? m_dele->getUnlink() : nullptr;
 		}
 
 	private:
-		std::unique_ptr<detail::Delegate_Impl<R, T...>> m_dele;
+		std::unique_ptr<detail::Delegate_Impl<Allocator, R, T...>> m_dele;
 	};
 
 	template<class R, class...T>
